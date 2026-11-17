@@ -1,0 +1,159 @@
+rules:
+  - id: js.code-injection.eval
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: eval()/new Function() on a non-constant value executes arbitrary code.
+    metadata:
+      title: Dynamic code execution
+      category: security
+      severity: high
+      confidence: medium
+      cwe: "CWE-95"
+      impact: If the value is influenced by a user, they can run arbitrary code.
+      fix: Avoid eval; use JSON.parse for data or an explicit lookup table.
+    pattern-either:
+      - patterns:
+          - pattern: eval($X)
+          - pattern-not: eval("...")
+      - pattern: new Function(...)
+
+  - id: js.xss.dom-sink
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: Untrusted HTML written into the DOM can execute scripts.
+    metadata:
+      title: Potential cross-site scripting (XSS)
+      category: security
+      severity: high
+      confidence: medium
+      cwe: "CWE-79"
+      impact: An attacker can run scripts in other users' browsers and steal their sessions.
+      fix: Use textContent, or sanitise with a vetted library such as DOMPurify before inserting HTML.
+    pattern-either:
+      - patterns:
+          - pattern: $EL.innerHTML = $X
+          - pattern-not: $EL.innerHTML = "..."
+      - patterns:
+          - pattern: $EL.outerHTML = $X
+          - pattern-not: $EL.outerHTML = "..."
+      - patterns:
+          - pattern: document.write($X)
+          - pattern-not: document.write("...")
+      - pattern: $EL.insertAdjacentHTML($POS, $X)
+
+  - id: js.xss.react-dangerously-set-inner-html
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: dangerouslySetInnerHTML renders raw HTML.
+    metadata:
+      title: Raw HTML rendered in React
+      category: security
+      severity: medium
+      confidence: medium
+      cwe: "CWE-79"
+      impact: If the HTML contains user input, scripts can run in users' browsers.
+      fix: Render text normally, or sanitise the HTML with DOMPurify first.
+    pattern: <$EL dangerouslySetInnerHTML={...} />
+
+  - id: js.command-injection.child-process
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: A shell command is built from dynamic input.
+    metadata:
+      title: Potential command injection
+      category: security
+      severity: high
+      confidence: high
+      cwe: "CWE-78"
+      impact: Shell metacharacters in the input let an attacker run extra commands.
+      fix: Use execFile/spawn with an argument array instead of exec with a string.
+    pattern-either:
+      - pattern: $CP.exec("..." + $X, ...)
+      - pattern: $CP.exec(`...${$X}...`, ...)
+      - pattern: $CP.execSync("..." + $X, ...)
+      - pattern: $CP.execSync(`...${$X}...`, ...)
+      - pattern: exec("..." + $X, ...)
+      - pattern: exec(`...${$X}...`, ...)
+      - pattern: execSync("..." + $X, ...)
+      - pattern: execSync(`...${$X}...`, ...)
+
+  - id: js.sql-injection.string-built-query
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: SQL query is built from strings at runtime; user input can change the query.
+    metadata:
+      title: Potential SQL injection
+      category: security
+      severity: critical
+      confidence: high
+      cwe: "CWE-89"
+      impact: An attacker may read, modify or delete data by manipulating the query.
+      fix: Use placeholders, e.g. db.query("SELECT * FROM users WHERE id = $1", [id]).
+    pattern-either:
+      - pattern: $DB.query("..." + $X, ...)
+      - pattern: $DB.query(`...${$X}...`, ...)
+      - pattern: $DB.execute("..." + $X, ...)
+      - pattern: $DB.execute(`...${$X}...`, ...)
+      - pattern: $DB.raw(`...${$X}...`, ...)
+      - pattern: $DB.$queryRawUnsafe(...)
+      - pattern: $DB.$executeRawUnsafe(...)
+
+  - id: js.tls.reject-unauthorized-disabled
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: TLS certificate verification is disabled.
+    metadata:
+      title: TLS certificate verification disabled
+      category: security
+      severity: high
+      confidence: high
+      cwe: "CWE-295"
+      impact: Traffic can be intercepted and modified by a man-in-the-middle.
+      fix: Remove rejectUnauthorized false and NODE_TLS_REJECT_UNAUTHORIZED; trust a CA bundle instead.
+    pattern-either:
+      - pattern: "{..., rejectUnauthorized: false, ...}"
+      - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
+
+  - id: js.secrets.hardcoded-credential
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: A credential appears to be hardcoded in source code.
+    metadata:
+      title: Hardcoded credential
+      category: security
+      severity: high
+      confidence: medium
+      cwe: "CWE-798"
+      impact: Anyone with repository access can use the credential, and it is hard to rotate.
+      fix: Read secrets from environment variables or a secrets manager at runtime.
+    patterns:
+      - pattern-either:
+          - pattern: const $NAME = "$VALUE"
+          - pattern: let $NAME = "$VALUE"
+          - pattern: var $NAME = "$VALUE"
+          - pattern: "{..., $NAME: \"$VALUE\", ...}"
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i)^.*(password|passwd|secret|api_?key|access_?token|auth_?token|private_?key)$
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: ^[^\s${}<>]{8,}$
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: (?i)^(?!.*(changeme|example|placeholder|your[_-]|xxx|dummy|test|redacted)).*$
+
+  - id: js.crypto.weak-hash
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: MD5/SHA-1 are broken for security purposes.
+    metadata:
+      title: Weak hash algorithm
+      category: security
+      severity: medium
+      confidence: medium
+      cwe: "CWE-328"
+      impact: Collisions can be forged; unsuitable for passwords, signatures or integrity checks.
+      fix: Use crypto.createHash("sha256"), or bcrypt/argon2 for passwords.
+    pattern-either:
+      - pattern: $C.createHash("md5")
+      - pattern: $C.createHash("sha1")

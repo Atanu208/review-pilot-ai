@@ -1,0 +1,177 @@
+name: reviewpilot
+
+x-backend-env: &backend-env
+  ENVIRONMENT: ${ENVIRONMENT:-local}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_JSON: ${LOG_JSON:-true}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-reviewpilot}:${POSTGRES_PASSWORD:-reviewpilot}@postgres:5432/${POSTGRES_DB:-reviewpilot}
+  REDIS_URL: redis://redis:6379/0
+  FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+  BACKEND_URL: ${BACKEND_URL:-http://localhost:8000}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+  SECRET_KEY: ${SECRET_KEY:-insecure-dev-secret-change-me}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+  DEMO_MODE: ${DEMO_MODE:-false}
+  RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+  RATE_LIMIT_WRITES_PER_MINUTE: ${RATE_LIMIT_WRITES_PER_MINUTE:-120}
+  RATE_LIMIT_REVIEW_ACTIONS_PER_MINUTE: ${RATE_LIMIT_REVIEW_ACTIONS_PER_MINUTE:-10}
+  RATE_LIMIT_WEBHOOKS_PER_MINUTE: ${RATE_LIMIT_WEBHOOKS_PER_MINUTE:-1000}
+  WEBHOOK_REPLAY_WINDOW_HOURS: ${WEBHOOK_REPLAY_WINDOW_HOURS:-72}
+  GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+  GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
+  GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+  # ./secrets is mounted read-only at /run/secrets/reviewpilot in backend and worker.
+  GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/reviewpilot/github-app.pem
+  GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+  GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+  GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+  GITHUB_PUBLISH_ENABLED: ${GITHUB_PUBLISH_ENABLED:-true}
+  PUBLISH_MAX_INLINE_COMMENTS: ${PUBLISH_MAX_INLINE_COMMENTS:-25}
+  LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5-5}
+  ANTHROPIC_EFFORT: ${ANTHROPIC_EFFORT:-high}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+  LLM_FALLBACK_MODELS: ${LLM_FALLBACK_MODELS:-}
+  LLM_FAST_MODEL: ${LLM_FAST_MODEL:-}
+  LLM_TOKENS_PER_MINUTE: ${LLM_TOKENS_PER_MINUTE:-0}
+  AI_REVIEW_ENABLED: ${AI_REVIEW_ENABLED:-true}
+  AI_REVIEWERS: ${AI_REVIEWERS:-security,bugs,performance,quality}
+  AI_MAX_INPUT_TOKENS: ${AI_MAX_INPUT_TOKENS:-3000}
+  AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-2000}
+  AI_VERIFY_FINDINGS: ${AI_VERIFY_FINDINGS:-true}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-reviewpilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-reviewpilot}
+      POSTGRES_DB: ${POSTGRES_DB:-reviewpilot}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    build: ./backend
+    image: reviewpilot-backend:local
+    command: ["alembic", "upgrade", "head"]
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    image: reviewpilot-backend:local
+    environment: *backend-env
+    volumes:
+      - ./secrets:/run/secrets/reviewpilot:ro
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    image: reviewpilot-backend:local
+    command:
+      [
+        "celery", "-A", "app.workers.celery_app:celery_app", "worker",
+        "--queues", "default,reviews,github",
+        "--concurrency", "${WORKER_CONCURRENCY:-2}",
+        "--loglevel", "INFO",
+      ]
+    environment: *backend-env
+    volumes:
+      - ./secrets:/run/secrets/reviewpilot:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app:celery_app inspect ping -d celery@$$HOSTNAME --timeout 5 | grep -q pong"]
+      interval: 30s
+      timeout: 15s
+      start_period: 30s
+      retries: 3
+    # Resource limits: review jobs process untrusted input; keep blast radius small.
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+    restart: unless-stopped
+
+  scheduler:
+    image: reviewpilot-backend:local
+    # Celery beat: periodic maintenance (re-enqueue lost work, fail orphaned jobs).
+    # Exactly one scheduler must run per deployment.
+    command:
+      [
+        "celery", "-A", "app.workers.celery_app:celery_app", "beat",
+        "--schedule", "/tmp/celerybeat-schedule", "--loglevel", "INFO",
+      ]
+    # The image's default healthcheck probes the API port; beat has none, so check that
+    # its schedule file exists and was written within the last 10 minutes instead.
+    healthcheck:
+      test: ["CMD-SHELL", "test -n \"$$(find /tmp -maxdepth 1 -name 'celerybeat-schedule*' -mmin -10)\""]
+      interval: 60s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    environment: *backend-env
+    volumes:
+      - ./secrets:/run/secrets/reviewpilot:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    environment:
+      INTERNAL_API_URL: http://backend:8000
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:

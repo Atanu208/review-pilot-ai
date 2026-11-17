@@ -1,0 +1,114 @@
+rules:
+  - id: java.sql-injection.string-built-query
+    languages: [java]
+    severity: ERROR
+    message: SQL query is built by string concatenation; user input can change the query.
+    metadata:
+      title: Potential SQL injection
+      category: security
+      severity: critical
+      confidence: high
+      cwe: "CWE-89"
+      impact: An attacker may read, modify or delete data by manipulating the query.
+      fix: Use a PreparedStatement with ? placeholders (or Spring JdbcTemplate parameters).
+    patterns:
+      - pattern-either:
+          - pattern: $S.$EXEC(<... "..." + $X ...>, ...)
+          - patterns:
+              - pattern-inside: |
+                  String $Q = <... "..." + $X ...>;
+                  ...
+              - pattern: $S.$EXEC($Q, ...)
+      - metavariable-regex:
+          metavariable: $EXEC
+          regex: ^(executeQuery|executeUpdate|executeLargeUpdate|execute|addBatch|prepareStatement|prepareCall|query|queryForObject|queryForList|queryForMap|update|batchUpdate|createQuery|createNativeQuery)$
+
+  - id: java.command-injection.runtime-exec
+    languages: [java]
+    severity: ERROR
+    message: An OS command is built from a non-constant string.
+    metadata:
+      title: Potential command injection
+      category: security
+      severity: high
+      confidence: medium
+      cwe: "CWE-78"
+      impact: An attacker controlling the input may run arbitrary commands.
+      fix: Use ProcessBuilder with a fixed executable and separate, validated arguments.
+    patterns:
+      - pattern: Runtime.getRuntime().exec($X, ...)
+      - pattern-not: Runtime.getRuntime().exec("...", ...)
+
+  - id: java.crypto.weak-hash
+    languages: [java]
+    severity: WARNING
+    message: MD5/SHA-1 are broken for security purposes.
+    metadata:
+      title: Weak hash algorithm
+      category: security
+      severity: medium
+      confidence: medium
+      cwe: "CWE-328"
+      impact: Collisions can be forged; unsuitable for passwords, signatures or integrity checks.
+      fix: Use MessageDigest.getInstance("SHA-256"), or BCrypt/Argon2 for passwords.
+    pattern-either:
+      - pattern: MessageDigest.getInstance("MD5")
+      - pattern: MessageDigest.getInstance("SHA-1")
+      - pattern: MessageDigest.getInstance("SHA1")
+
+  - id: java.deserialization.object-input-stream
+    languages: [java]
+    severity: WARNING
+    message: Java native deserialization of untrusted data can execute code.
+    metadata:
+      title: Insecure deserialization
+      category: security
+      severity: high
+      confidence: medium
+      cwe: "CWE-502"
+      impact: Gadget chains in the classpath can give an attacker remote code execution.
+      fix: Use a data format such as JSON, or an ObjectInputFilter allow-list.
+    pattern: (java.io.ObjectInputStream $O).readObject()
+
+  - id: java.spring.csrf-disabled
+    languages: [java]
+    severity: WARNING
+    message: CSRF protection is disabled in Spring Security.
+    metadata:
+      title: CSRF protection disabled
+      category: security
+      severity: medium
+      confidence: medium
+      cwe: "CWE-352"
+      impact: Other sites can submit requests on behalf of logged-in users (if cookies authenticate).
+      fix: Keep CSRF enabled for cookie-authenticated endpoints; disable only for stateless token APIs.
+    pattern-either:
+      - pattern: $H.csrf().disable()
+      - pattern: $H.csrf(AbstractHttpConfigurer::disable)
+      - pattern: $H.csrf($C -> $C.disable())
+
+  - id: java.secrets.hardcoded-credential
+    languages: [java]
+    severity: WARNING
+    message: A credential appears to be hardcoded in source code.
+    metadata:
+      title: Hardcoded credential
+      category: security
+      severity: high
+      confidence: medium
+      cwe: "CWE-798"
+      impact: Anyone with repository access can use the credential, and it is hard to rotate.
+      fix: Inject secrets from configuration (environment variables, Vault, Spring config).
+    patterns:
+      - pattern-either:
+          - pattern: String $NAME = "$VALUE";
+          - pattern: $T $NAME = "$VALUE";
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i)^.*(password|passwd|secret|api_?key|access_?token|auth_?token|private_?key)$
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: ^[^\s${}<>]{8,}$
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: (?i)^(?!.*(changeme|example|placeholder|your[_-]|xxx|dummy|test|redacted)).*$

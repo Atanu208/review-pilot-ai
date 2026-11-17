@@ -1,0 +1,244 @@
+rules:
+  - id: python.sql-injection.string-built-query
+    languages: [python]
+    severity: ERROR
+    message: SQL query is built from strings at runtime; user input can change the query.
+    metadata:
+      title: Potential SQL injection
+      category: security
+      severity: critical
+      confidence: high
+      cwe: "CWE-89"
+      impact: An attacker may read, modify or delete data by manipulating the query.
+      fix: Use parameterised queries, e.g. cursor.execute("... WHERE id = %s", (user_id,)).
+    pattern-either:
+      - pattern: $CUR.execute(f"...", ...)
+      - pattern: $CUR.execute("..." % $X, ...)
+      - pattern: $CUR.execute("...".format(...), ...)
+      - pattern: $CUR.execute("..." + $X, ...)
+      - pattern: $CUR.executemany(f"...", ...)
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  $Q = f"..."
+                  ...
+              - pattern-inside: |
+                  $Q = "..." % $X
+                  ...
+              - pattern-inside: |
+                  $Q = "..." + $X
+                  ...
+              - pattern-inside: |
+                  $Q = "...".format(...)
+                  ...
+          - pattern: $CUR.execute($Q, ...)
+      - pattern: $M.objects.raw(f"...", ...)
+      - pattern: $M.objects.raw("..." % $X, ...)
+      - pattern: $M.objects.raw("...".format(...), ...)
+      - pattern: sqlalchemy.text(f"...")
+      - pattern: text(f"...")
+      - pattern: RawSQL(f"...", ...)
+
+  - id: python.code-injection.eval
+    languages: [python]
+    severity: ERROR
+    message: eval()/exec() on a non-constant value executes arbitrary code.
+    metadata:
+      title: Dynamic code execution
+      category: security
+      severity: high
+      confidence: medium
+      cwe: "CWE-95"
+      impact: If the value is influenced by a user, they can run arbitrary code on the server.
+      fix: Avoid eval/exec; use ast.literal_eval for literals or an explicit dispatch table.
+    pattern-either:
+      - patterns:
+          - pattern: eval($X, ...)
+          - pattern-not: eval("...", ...)
+      - patterns:
+          - pattern: exec($X, ...)
+          - pattern-not: exec("...", ...)
+
+  - id: python.command-injection.shell
+    languages: [python]
+    severity: ERROR
+    message: A shell command is run with a non-constant string.
+    metadata:
+      title: Potential command injection
+      category: security
+      severity: high
+      confidence: high
+      cwe: "CWE-78"
+      impact: Shell metacharacters in the input let an attacker run extra commands.
+      fix: Pass an argument list without shell=True, e.g. subprocess.run(["git", "log", ref], check=True).
+    pattern-either:
+      - patterns:
+          - pattern: subprocess.$F(..., shell=True, ...)
+          - pattern-not: subprocess.$F("...", ..., shell=True, ...)
+      - patterns:
+          - pattern: os.system($X)
+          - pattern-not: os.system("...")
+      - patterns:
+          - pattern: os.popen($X, ...)
+          - pattern-not: os.popen("...", ...)
+
+  - id: python.deserialization.unsafe-yaml
+    languages: [python]
+    severity: ERROR
+    message: yaml.load without a safe Loader can construct arbitrary Python objects.
+    metadata:
+      title: Unsafe YAML deserialization
+      category: security
+      severity: high
+      confidence: high
+      cwe: "CWE-502"
+      impact: Loading attacker-controlled YAML can lead to remote code execution.
+      fix: Use yaml.safe_load(data).
+    pattern-either:
+      - patterns:
+          - pattern: yaml.load(...)
+          - pattern-not: yaml.load(..., Loader=yaml.SafeLoader, ...)
+          - pattern-not: yaml.load(..., Loader=SafeLoader, ...)
+          - pattern-not: yaml.load(..., Loader=yaml.CSafeLoader, ...)
+      - pattern: yaml.unsafe_load(...)
+
+  - id: python.deserialization.pickle
+    languages: [python]
+    severity: WARNING
+    message: pickle deserialization can execute arbitrary code if the data is untrusted.
+    metadata:
+      title: Insecure deserialization with pickle
+      category: security
+      severity: high
+      confidence: medium
+      cwe: "CWE-502"
+      impact: Unpickling attacker-controlled bytes gives them code execution.
+      fix: Use a data-only format such as JSON for untrusted input.
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+      - pattern: cPickle.loads(...)
+
+  - id: python.tls.verify-disabled
+    languages: [python]
+    severity: ERROR
+    message: TLS certificate verification is disabled.
+    metadata:
+      title: TLS certificate verification disabled
+      category: security
+      severity: high
+      confidence: high
+      cwe: "CWE-295"
+      impact: Traffic can be intercepted and modified by a man-in-the-middle.
+      fix: Remove verify=False; configure a CA bundle if a private CA is needed.
+    pattern-either:
+      - pattern: requests.$M(..., verify=False, ...)
+      - pattern: httpx.$M(..., verify=False, ...)
+      - pattern: httpx.Client(..., verify=False, ...)
+      - pattern: httpx.AsyncClient(..., verify=False, ...)
+
+  - id: python.crypto.weak-hash
+    languages: [python]
+    severity: WARNING
+    message: MD5/SHA-1 are broken for security purposes.
+    metadata:
+      title: Weak hash algorithm
+      category: security
+      severity: medium
+      confidence: medium
+      cwe: "CWE-328"
+      impact: Collisions can be forged; unsuitable for passwords, signatures or integrity checks.
+      fix: Use hashlib.sha256 (or bcrypt/argon2 for passwords). Pass usedforsecurity=False if not security-related.
+    patterns:
+      - pattern-either:
+          - pattern: hashlib.md5(...)
+          - pattern: hashlib.sha1(...)
+      - pattern-not: hashlib.$H(..., usedforsecurity=False, ...)
+
+  - id: python.secrets.hardcoded-credential
+    languages: [python]
+    severity: WARNING
+    message: A credential appears to be hardcoded in source code.
+    metadata:
+      title: Hardcoded credential
+      category: security
+      severity: high
+      confidence: medium
+      cwe: "CWE-798"
+      impact: Anyone with repository access can use the credential, and it is hard to rotate.
+      fix: Load secrets from environment variables or a secrets manager.
+    patterns:
+      - pattern-either:
+          - pattern: $NAME = "$VALUE"
+          - pattern: $OBJ.$NAME = "$VALUE"
+          - pattern: $F(..., $NAME="$VALUE", ...)
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i)^.*(password|passwd|secret|api_?key|access_?token|auth_?token|private_?key)$
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: ^[^\s${}<>]{8,}$
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: (?i)^(?!.*(changeme|example|placeholder|your[_-]|xxx|dummy|test|redacted)).*$
+
+  - id: python.flask.debug-enabled
+    languages: [python]
+    severity: WARNING
+    message: Flask debug mode exposes an interactive debugger that allows code execution.
+    metadata:
+      title: Flask debug mode enabled
+      category: security
+      severity: high
+      confidence: high
+      cwe: "CWE-489"
+      impact: Anyone reaching the debugger can execute arbitrary Python on the server.
+      fix: Control debug via configuration and never enable it in production.
+    pattern: $APP.run(..., debug=True, ...)
+
+  - id: python.jwt.signature-not-verified
+    languages: [python]
+    severity: ERROR
+    message: JWT signature verification is disabled.
+    metadata:
+      title: JWT signature not verified
+      category: security
+      severity: critical
+      confidence: high
+      cwe: "CWE-347"
+      impact: Attackers can forge tokens and impersonate any user.
+      fix: Always verify signatures and pin the expected algorithms, e.g. jwt.decode(token, key, algorithms=["RS256"]).
+    pattern-either:
+      - pattern: 'jwt.decode(..., options={..., "verify_signature": False, ...}, ...)'
+      - pattern: jwt.decode(..., verify=False, ...)
+
+  - id: python.tempfile.mktemp
+    languages: [python]
+    severity: WARNING
+    message: tempfile.mktemp is race-prone; another process can create the file first.
+    metadata:
+      title: Insecure temporary file
+      category: security
+      severity: medium
+      confidence: high
+      cwe: "CWE-377"
+      impact: An attacker can hijack or replace the temporary file.
+      fix: Use tempfile.NamedTemporaryFile or tempfile.mkstemp.
+    pattern: tempfile.mktemp(...)
+
+  - id: python.django.csrf-exempt
+    languages: [python]
+    severity: WARNING
+    message: CSRF protection is disabled for this view.
+    metadata:
+      title: CSRF protection disabled
+      category: security
+      severity: medium
+      confidence: medium
+      cwe: "CWE-352"
+      impact: Other sites can trigger this view on behalf of logged-in users.
+      fix: Remove @csrf_exempt, or authenticate the endpoint with a non-cookie mechanism (e.g. signed webhooks).
+    pattern: |
+      @csrf_exempt
+      def $F(...):
+        ...
